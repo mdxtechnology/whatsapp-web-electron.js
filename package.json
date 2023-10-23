@@ -1,6 +1,6 @@
 {
     "name": "whatsapp-web-electron.js",
-  "version": "1.22.2-alpha.0",
+    "version": "1.23.0",
     "description": "Library for interacting with the WhatsApp Web API through electron",
     "main": "./index.js",
     "typings": "./index.d.ts",
@@ -23,7 +23,7 @@
         "client",
         "node"
     ],
-    "author": "Daffa Mumtaz",
+    "author": "Pedro Lopez, Daffa Mumtaz",
     "license": "Apache-2.0",
     "bugs": {
         "url": "https://github.com/Zzombiee2361/whatsapp-web-electron.js/issues"
