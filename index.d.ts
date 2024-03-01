@@ -1,12 +1,13 @@
 
 import { EventEmitter } from 'events'
 import { RequestInit } from 'node-fetch'
-import * as puppeteer from 'puppeteer'
+import { BrowserWindow } from 'electron';
+import * as puppeteer from 'puppeteer-core'
 
 declare namespace WAWebJS {
 
     export class Client extends EventEmitter {
-        constructor(options: ClientOptions)
+        constructor(browser: puppeteer.Browser, browserWindow: BrowserWindow, options?: ClientOptions)
 
         /** Current connection information */
         public info: ClientInfo
