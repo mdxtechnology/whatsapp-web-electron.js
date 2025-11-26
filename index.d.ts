@@ -883,12 +883,14 @@ declare namespace WAWebJS {
         GROUP_MEMBERSHIP_REQUEST = 'group_membership_request',
         GROUP_UPDATE = 'group_update',
         QR_RECEIVED = 'qr',
+        CODE_RECEIVED = 'code',
         LOADING_SCREEN = 'loading_screen',
         DISCONNECTED = 'disconnected',
         STATE_CHANGED = 'change_state',
         BATTERY_CHANGED = 'change_battery',
         REMOTE_SESSION_SAVED = 'remote_session_saved',
-        CALL = 'call'
+        INCOMING_CALL = 'call',
+        VOTE_UPDATE = 'vote_update',
     }
 
     /** Group notification types */
@@ -897,6 +899,8 @@ declare namespace WAWebJS {
         INVITE = 'invite',
         REMOVE = 'remove',
         LEAVE = 'leave',
+        PROMOTE = 'promote',
+        DEMOTE = 'demote',
         SUBJECT = 'subject',
         DESCRIPTION = 'description',
         PICTURE = 'picture',
@@ -920,6 +924,7 @@ declare namespace WAWebJS {
         AUDIO = 'audio',
         VOICE = 'ptt',
         IMAGE = 'image',
+        ALBUM = 'album',
         VIDEO = 'video',
         DOCUMENT = 'document',
         STICKER = 'sticker',
@@ -1211,6 +1216,10 @@ declare namespace WAWebJS {
          * Once the event is canceled, it can not be edited.
          */
         editScheduledEvent: (editedEventObject: Event) => Promise<Message | null>,
+        /**
+         * Send votes to the poll message
+         */
+        vote: (selectedOptions: Array<string>) => Promise<void>,
     }
 
     /** ID that represents a message */
@@ -1274,7 +1283,7 @@ declare namespace WAWebJS {
         endTime?: Date,
         /** The location of the event */
         location?: string,
-        /** The type of a WhatsApp call link to generate, valid values are: `video` | `voice` */
+        /** The type of a WhatsApp call link to generate, valid values are: `video` | `voice` | `none` */
         callType?: string,
         /**
          * Indicates if a scheduled event should be sent as an already canceled
@@ -1301,7 +1310,7 @@ declare namespace WAWebJS {
             messageSecret?: string;
         };
 
-        constructor(name: string, startTime: Date, options?: EventSendOptions)
+        constructor(name: string, startTime: Date, options?: ScheduledEventSendOptions)
     }
 
     /** Represents a Poll Vote on WhatsApp */
