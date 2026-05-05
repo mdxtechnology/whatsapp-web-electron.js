@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"c:\\\\Work\\\\whatsapp-web-electron.js\" -Recurse -Directory)",
+      "Bash(Select-Object -First 20)",
+      "Bash(Format-Table FullName)",
+      "Bash(git log *)",
+      "Bash(xargs grep -l \"WebRTC\\\\|webrtc\\\\|peerconnection\\\\|RTCPeer\")",
+      "Bash(git show *)"
+    ]
+  }
+}
