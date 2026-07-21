@@ -116,6 +116,7 @@ class Client extends EventEmitter {
      * Private function
      */
     async inject() {
+        try {
         if (
             this.options.authTimeoutMs === undefined ||
             this.options.authTimeoutMs == 0
@@ -135,7 +136,7 @@ class Client extends EventEmitter {
             await new Promise((r) => setTimeout(r, 200));
         }
         if (!res) {
-            throw 'auth timeout';
+            throw new Error('WhatsApp Web did not load within the configured authTimeoutMs — check network connectivity or increase the timeout');
         }
         await this.setDeviceName(
             this.options.deviceName,
@@ -299,6 +300,7 @@ class Client extends EventEmitter {
             this.pupPage,
             'onAppStateHasSyncedEvent',
             async () => {
+                try {
                 const authEventPayload =
                     await this.authStrategy.getAuthEventPayload();
                 /**
@@ -342,7 +344,7 @@ class Client extends EventEmitter {
                         await new Promise((r) => setTimeout(r, 200));
                     }
                     if (!res) {
-                        throw 'ready timeout';
+                        throw new Error('WWebJS utilities did not inject within 30 seconds of authentication — WhatsApp Web may have updated its internals');
                     }
 
                     /**
@@ -377,6 +379,9 @@ class Client extends EventEmitter {
                  */
                 this.emit(Events.READY);
                 this.authStrategy.afterAuthReady();
+                } catch (err) {
+                    console.error('[WWebJS] Post-authentication setup failed:', err);
+                }
             },
         );
         let lastPercent = null;
@@ -424,6 +429,10 @@ class Client extends EventEmitter {
                 await window.onLogoutEvent();
             });
         });
+        } catch (err) {
+            console.error('[WWebJS] inject() failed:', err);
+            throw err;
+        }
     }
 
     /**
@@ -467,7 +476,12 @@ class Client extends EventEmitter {
             referer: 'https://whatsapp.com/',
         });
 
-        await this.inject();
+        try {
+            await this.inject();
+        } catch (err) {
+            console.error('[WWebJS] initialize() failed during inject():', err);
+            throw err;
+        }
 
         this.pupPage.on('framenavigated', async (frame) => {
             if (frame.url().includes('post_logout=1') || this.lastLoggedOut) {
@@ -477,7 +491,11 @@ class Client extends EventEmitter {
                 await this.authStrategy.afterBrowserInitialized();
                 this.lastLoggedOut = false;
             }
-            await this.inject();
+            try {
+                await this.inject();
+            } catch (err) {
+                console.error('[WWebJS] Re-injection failed after frame navigation:', err);
+            }
         });
     }
 
