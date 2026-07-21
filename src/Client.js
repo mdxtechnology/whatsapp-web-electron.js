@@ -286,17 +286,22 @@ class Client extends EventEmitter {
                 },
             );
 
-            await exposeFunctionIfAbsent(
-                this.pupPage,
-                'onAppStateHasSyncedEvent',
-                async () => {
+            const onAppStateHasSynced = async () => {
+                if (this._readyEmitted || this._readyInProgress) return;
+
+                this._readyInProgress = true;
+
+                try {
                     const authEventPayload =
                         await this.authStrategy.getAuthEventPayload();
                     /**
                      * Emitted when authentication is successful
                      * @event Client#authenticated
                      */
-                    this.emit(Events.AUTHENTICATED, authEventPayload);
+                    if (!this._authenticatedEmitted) {
+                        this.emit(Events.AUTHENTICATED, authEventPayload);
+                        this._authenticatedEmitted = true;
+                    }
 
                     const injected = await this.pupPage.evaluate(async () => {
                         return typeof window.WWebJS !== 'undefined';
@@ -331,7 +336,9 @@ class Client extends EventEmitter {
                             .catch(() => {
                                 throw 'ready timeout';
                             });
+                    }
 
+                    if (!this.info) {
                         /**
                          * Current connection information
                          * @type {ClientInfo}
@@ -353,18 +360,55 @@ class Client extends EventEmitter {
                                 };
                             }),
                         );
-
-                        this.interface = new InterfaceController(this);
-
-                        await this.attachEventListeners();
                     }
+
+                    if (!this.interface) {
+                        this.interface = new InterfaceController(this);
+                    }
+
+                    if (!this._eventListenersAttached) {
+                        await this.attachEventListeners();
+                        this._eventListenersAttached = true;
+                    }
+
                     /**
                      * Emitted when the client has initialized and is ready to receive messages.
                      * @event Client#ready
                      */
-                    this.emit(Events.READY);
-                    this.authStrategy.afterAuthReady();
-                },
+                    if (!this._readyEmitted) {
+                        this._readyEmitted = true;
+                        this.emit(Events.READY);
+                        this.authStrategy.afterAuthReady();
+                    }
+                } catch (err) {
+                    const message =
+                        err && err.message ? err.message : String(err);
+                    const isTransientPageError =
+                        message.includes('Target closed') ||
+                        message.includes('Execution context was destroyed') ||
+                        message.includes('Cannot find context');
+
+                    this._readyInProgress = false;
+
+                    if (isTransientPageError && !this._readyEmitted) {
+                        setTimeout(() => {
+                            onAppStateHasSynced().catch(() => {});
+                        }, 1000);
+                        return;
+                    }
+
+                    throw err;
+                } finally {
+                    if (!this._readyEmitted) {
+                        this._readyInProgress = false;
+                    }
+                }
+            };
+
+            await exposeFunctionIfAbsent(
+                this.pupPage,
+                'onAppStateHasSyncedEvent',
+                onAppStateHasSynced,
             );
             let lastPercent = null;
             await exposeFunctionIfAbsent(
@@ -450,7 +494,14 @@ class Client extends EventEmitter {
                 // If hasSynced is false, the listener above will catch the future transition.
                 const storeInjected = typeof window.WWebJS !== 'undefined';
                 if (Socket.hasSynced === true && !storeInjected) {
-                    window.onAppStateHasSyncedEvent();
+                    setTimeout(() => {
+                        if (
+                            Socket.hasSynced === true &&
+                            typeof window.WWebJS === 'undefined'
+                        ) {
+                            window.onAppStateHasSyncedEvent();
+                        }
+                    }, 2000);
                 }
             });
         } catch (err) {
