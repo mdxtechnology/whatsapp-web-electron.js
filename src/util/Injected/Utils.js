@@ -523,7 +523,7 @@ exports.LoadUtils = () => {
                         : {}),
                 });
 
-            if (sendChannelMsgResponse.success) {
+            if (sendChannelMsgResponse.success && sendChannelMsgResponse.ack) {
                 msg.t = sendChannelMsgResponse.ack.t;
                 msg.serverId = sendChannelMsgResponse.serverId;
             }
@@ -573,16 +573,73 @@ exports.LoadUtils = () => {
             return msg;
         }
 
-        const [msgPromise, sendMsgResultPromise] = window
+        const sendMsgChatActionResult = window
             .require('WAWebSendMsgChatAction')
             .addAndSendMsgToChat(chat, message);
-        await msgPromise;
 
-        if (options.waitUntilMsgSent) await sendMsgResultPromise;
+        const findMessageModel = (value) => {
+            if (!value) return null;
+            if (typeof value.serialize === 'function') return value;
+            if (Array.isArray(value)) {
+                for (const item of value) {
+                    const model = findMessageModel(item);
+                    if (model) return model;
+                }
+                return null;
+            }
+            if (typeof value !== 'object') return null;
 
-        return window
-            .require('WAWebCollections')
-            .Msg.get(newMsgKey._serialized);
+            for (const key of [
+                'msg',
+                'message',
+                'model',
+                'msgModel',
+                'messageModel',
+                'result',
+                'value',
+            ]) {
+                const model = findMessageModel(value[key]);
+                if (model) return model;
+            }
+
+            return null;
+        };
+
+        const Msg = window.require('WAWebCollections').Msg;
+        let msgPromise;
+        let sendMsgResultPromise;
+
+        if (Array.isArray(sendMsgChatActionResult)) {
+            [msgPromise, sendMsgResultPromise] = sendMsgChatActionResult;
+        } else {
+            msgPromise =
+                sendMsgChatActionResult?.msgPromise ||
+                sendMsgChatActionResult?.messagePromise ||
+                sendMsgChatActionResult?.promise ||
+                sendMsgChatActionResult;
+            sendMsgResultPromise =
+                sendMsgChatActionResult?.sendMsgResultPromise ||
+                sendMsgChatActionResult?.sendResultPromise ||
+                sendMsgChatActionResult?.resultPromise;
+        }
+
+        const msgPromiseResult = await Promise.resolve(msgPromise);
+        const sendMsgResult = options.waitUntilMsgSent
+            ? await Promise.resolve(sendMsgResultPromise)
+            : undefined;
+
+        const sentMsg =
+            findMessageModel(msgPromiseResult) ||
+            findMessageModel(sendMsgResult) ||
+            findMessageModel(sendMsgChatActionResult) ||
+            Msg.get(newMsgKey._serialized);
+
+        if (sentMsg) return sentMsg;
+
+        console.warn(
+            '[WWebJS] Sent message was not immediately available in WA collection; returning local message model',
+        );
+        return new Msg.modelClass(message);
     };
 
     window.WWebJS.editMessage = async (msg, content, options = {}) => {
@@ -800,8 +857,13 @@ exports.LoadUtils = () => {
         return mediaData;
     };
 
-    window.WWebJS.getMessageModel = (message) => {
+    window.WWebJS.getMessageModel = (message, fallback = undefined) => {
+        if (!message || typeof message.serialize !== 'function') {
+            return fallback;
+        }
+
         const msg = message.serialize();
+        if (!msg) return fallback;
 
         const { findLinks } = window.require('WALinkify');
 

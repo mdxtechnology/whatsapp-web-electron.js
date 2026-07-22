@@ -1209,38 +1209,48 @@ class Client extends EventEmitter {
                 // Optional recovery hook; do not block READY if WhatsApp renames it.
             }
 
+            const getMessageModelSafe = (msg) => {
+                try {
+                    return window.WWebJS.getMessageModel(msg);
+                } catch (err) {
+                    console.warn(
+                        '[WWebJS] Failed to serialize message event:',
+                        err,
+                    );
+                    return undefined;
+                }
+            };
+
             Msg.on('change', (msg) => {
-                window.onChangeMessageEvent(window.WWebJS.getMessageModel(msg));
+                const message = getMessageModelSafe(msg);
+                if (message) window.onChangeMessageEvent(message);
             });
             Msg.on('change:type', (msg) => {
-                window.onChangeMessageTypeEvent(
-                    window.WWebJS.getMessageModel(msg),
-                );
+                const message = getMessageModelSafe(msg);
+                if (message) window.onChangeMessageTypeEvent(message);
             });
             Msg.on('change:ack', (msg, ack) => {
-                window.onMessageAckEvent(
-                    window.WWebJS.getMessageModel(msg),
-                    ack,
-                );
+                const message = getMessageModelSafe(msg);
+                if (message) {
+                    window.onMessageAckEvent(message, ack);
+                }
             });
             Msg.on('change:isUnsentMedia', (msg, unsent) => {
-                if (msg.id.fromMe && !unsent)
-                    window.onMessageMediaUploadedEvent(
-                        window.WWebJS.getMessageModel(msg),
-                    );
+                if (msg.id.fromMe && !unsent) {
+                    const message = getMessageModelSafe(msg);
+                    if (message) window.onMessageMediaUploadedEvent(message);
+                }
             });
             Msg.on('remove', (msg) => {
-                if (msg.isNewMsg)
-                    window.onRemoveMessageEvent(
-                        window.WWebJS.getMessageModel(msg),
-                    );
+                if (msg.isNewMsg) {
+                    const message = getMessageModelSafe(msg);
+                    if (message) window.onRemoveMessageEvent(message);
+                }
             });
             Msg.on('change:body change:caption', (msg, newBody, prevBody) => {
-                window.onEditMessageEvent(
-                    window.WWebJS.getMessageModel(msg),
-                    newBody,
-                    prevBody,
-                );
+                const message = getMessageModelSafe(msg);
+                if (message)
+                    window.onEditMessageEvent(message, newBody, prevBody);
             });
             AppState.on('change:state', (_AppState, state) => {
                 window.onAppStateChangedEvent(state);
@@ -1285,15 +1295,14 @@ class Client extends EventEmitter {
                 if (!msg.isNewMsg) return;
 
                 if (msg.type !== 'ciphertext') {
-                    window.onAddMessageEvent(
-                        window.WWebJS.getMessageModel(msg),
-                    );
+                    const message = getMessageModelSafe(msg);
+                    if (message) window.onAddMessageEvent(message);
                     return;
                 }
 
-                window.onAddMessageCiphertextEvent(
-                    window.WWebJS.getMessageModel(msg),
-                );
+                const ciphertextMessage = getMessageModelSafe(msg);
+                if (ciphertextMessage)
+                    window.onAddMessageCiphertextEvent(ciphertextMessage);
 
                 if (msg.subtype && msg.subtype.endsWith('_unavailable_fanout'))
                     return;
@@ -1302,18 +1311,16 @@ class Client extends EventEmitter {
 
                 const failTimer = setTimeout(() => {
                     if (msg.type !== 'ciphertext') return;
-                    window.onCiphertextFailedEvent(
-                        window.WWebJS.getMessageModel(msg),
-                    );
+                    const message = getMessageModelSafe(msg);
+                    if (message) window.onCiphertextFailedEvent(message);
                 }, 15000);
 
                 msg.once('change:type', (_msg) => {
                     clearTimeout(failTimer);
                     pendingResend.delete(_msg);
                     if (_msg.type === 'revoked') return;
-                    window.onAddMessageEvent(
-                        window.WWebJS.getMessageModel(_msg),
-                    );
+                    const message = getMessageModelSafe(_msg);
+                    if (message) window.onAddMessageEvent(message);
                 });
             });
             Chat.on('change:unreadCount', (chat) => {
