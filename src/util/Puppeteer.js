@@ -14,41 +14,51 @@ const exposedFunctions = new WeakMap();
 let exposedFunctionId = 0;
 
 async function exposeFunctionIfAbsent(page, name, fn) {
-    let functions = exposedFunctions.get(page);
-    if (!functions) {
-        functions = new Map();
-        exposedFunctions.set(page, functions);
+    let state = exposedFunctions.get(page);
+    if (!state) {
+        state = {
+            functions: new Map(),
+            dispatcherBindingName: `__wwebjs_exposed_dispatcher_${++exposedFunctionId}`,
+            dispatcherExposed: false,
+        };
+        exposedFunctions.set(page, state);
     }
 
-    const current = functions.get(name);
-    if (current) {
-        current.fn = fn;
-        await page.evaluate(
-            ({ name, bindingName }) => {
-                window[name] = (...args) => window[bindingName](...args);
-            },
-            { name, bindingName: current.bindingName },
-        );
-        return;
-    }
+    state.functions.set(name, fn);
 
-    const bindingName = `__wwebjs_exposed_${name}_${++exposedFunctionId}`;
-    const entry = { fn, bindingName };
-    functions.set(name, entry);
+    if (!state.dispatcherExposed) {
+        try {
+            await page.exposeFunction(
+                state.dispatcherBindingName,
+                (functionName, ...args) => {
+                    const target = state.functions.get(functionName);
+                    if (!target) {
+                        throw new Error(
+                            `No exposed WWebJS function registered for ${functionName}`,
+                        );
+                    }
+
+                    return target(...args);
+                },
+            );
+            state.dispatcherExposed = true;
+        } catch (err) {
+            state.functions.delete(name);
+            throw err;
+        }
+    }
 
     try {
-        await page.exposeFunction(bindingName, (...args) => entry.fn(...args));
+        await page.evaluate(
+            ({ name, bindingName }) => {
+                window[name] = (...args) => window[bindingName](name, ...args);
+            },
+            { name, bindingName: state.dispatcherBindingName },
+        );
     } catch (err) {
-        functions.delete(name);
+        state.functions.delete(name);
         throw err;
     }
-
-    await page.evaluate(
-        ({ name, bindingName }) => {
-            window[name] = (...args) => window[bindingName](...args);
-        },
-        { name, bindingName },
-    );
 }
 
 module.exports = { exposeFunctionIfAbsent };
