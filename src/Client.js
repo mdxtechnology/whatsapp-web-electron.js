@@ -776,6 +776,61 @@ class Client extends EventEmitter {
         };
 
         await exposeEventFunction(
+            'onMessageAckEvent',
+            (msg, ack) => {
+                const message = new Message(this, msg);
+                if (msg?._wwebjsAckSource) {
+                    message._wwebjsAckSource = msg._wwebjsAckSource;
+                }
+
+                /**
+                 * Emitted when an ack event occurrs on message type.
+                 * @event Client#message_ack
+                 * @param {Message} message The message that was affected
+                 * @param {MessageAck} ack The new ACK value
+                 */
+                this.emit(Events.MESSAGE_ACK, message, ack);
+            },
+        );
+
+        onProgress('registering native ACK listener');
+        await this.pupPage.evaluate(() => {
+            const { Msg } = window.require('WAWebCollections');
+
+            const getMessageModelSafe = (msg) => {
+                try {
+                    return window.WWebJS.getMessageModel(msg);
+                } catch (err) {
+                    console.warn(
+                        '[WWebJS] Failed to serialize message ACK event:',
+                        err,
+                    );
+                    return undefined;
+                }
+            };
+
+            if (window._wwjsAckListener) {
+                Msg.off('change:ack', window._wwjsAckListener);
+            }
+
+            window._wwjsAckListener = (msg, ack) => {
+                const message = getMessageModelSafe(msg);
+                if (message) {
+                    console.debug('[WWebJS ACK TRACE] native ACK event', {
+                        msgId: message?.id?.id,
+                        serializedAck: message?.ack,
+                        eventAck: ack,
+                        fromMe: message?.id?.fromMe || message?.fromMe,
+                    });
+                    message._wwebjsAckSource = 'native-change:ack';
+                    window.onMessageAckEvent(message, ack);
+                }
+            };
+
+            Msg.on('change:ack', window._wwjsAckListener);
+        });
+
+        await exposeEventFunction(
             'onAddMessageEvent',
             (msg) => {
                 if (msg.type === 'gp2') {
@@ -951,21 +1006,6 @@ class Client extends EventEmitter {
                  * @param {Message} message The message that was revoked
                  */
                 this.emit(Events.MESSAGE_REVOKED_ME, message);
-            },
-        );
-
-        await exposeEventFunction(
-            'onMessageAckEvent',
-            (msg, ack) => {
-                const message = new Message(this, msg);
-
-                /**
-                 * Emitted when an ack event occurrs on message type.
-                 * @event Client#message_ack
-                 * @param {Message} message The message that was affected
-                 * @param {MessageAck} ack The new ACK value
-                 */
-                this.emit(Events.MESSAGE_ACK, message, ack);
             },
         );
 
@@ -1228,12 +1268,6 @@ class Client extends EventEmitter {
             Msg.on('change:type', (msg) => {
                 const message = getMessageModelSafe(msg);
                 if (message) window.onChangeMessageTypeEvent(message);
-            });
-            Msg.on('change:ack', (msg, ack) => {
-                const message = getMessageModelSafe(msg);
-                if (message) {
-                    window.onMessageAckEvent(message, ack);
-                }
             });
             Msg.on('change:isUnsentMedia', (msg, unsent) => {
                 if (msg.id.fromMe && !unsent) {
