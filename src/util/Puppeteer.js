@@ -10,14 +10,45 @@
  * @param {string} name
  * @param {Function} fn
  */
+const exposedFunctions = new WeakMap();
+let exposedFunctionId = 0;
+
 async function exposeFunctionIfAbsent(page, name, fn) {
-    const exist = await page.evaluate((name) => {
-        return !!window[name];
-    }, name);
-    if (exist) {
+    let functions = exposedFunctions.get(page);
+    if (!functions) {
+        functions = new Map();
+        exposedFunctions.set(page, functions);
+    }
+
+    const current = functions.get(name);
+    if (current) {
+        current.fn = fn;
+        await page.evaluate(
+            ({ name, bindingName }) => {
+                window[name] = (...args) => window[bindingName](...args);
+            },
+            { name, bindingName: current.bindingName },
+        );
         return;
     }
-    await page.exposeFunction(name, fn);
+
+    const bindingName = `__wwebjs_exposed_${name}_${++exposedFunctionId}`;
+    const entry = { fn, bindingName };
+    functions.set(name, entry);
+
+    try {
+        await page.exposeFunction(bindingName, (...args) => entry.fn(...args));
+    } catch (err) {
+        functions.delete(name);
+        throw err;
+    }
+
+    await page.evaluate(
+        ({ name, bindingName }) => {
+            window[name] = (...args) => window[bindingName](...args);
+        },
+        { name, bindingName },
+    );
 }
 
 module.exports = { exposeFunctionIfAbsent };

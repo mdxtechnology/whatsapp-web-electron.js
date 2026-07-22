@@ -306,79 +306,162 @@ class Client extends EventEmitter {
                         this._authenticatedEmitted = true;
                     }
 
-                    const injected = await this.pupPage.evaluate(async () => {
-                        return typeof window.WWebJS !== 'undefined';
-                    });
+                    const emitReady = () => {
+                        if (this._readyEmitted) return;
+                        this._readyEmitted = true;
+                        this.emit(Events.READY);
+                        this.authStrategy.afterAuthReady();
+                    };
 
-                    if (!injected) {
-                        if (
-                            this.options.webVersionCache.type === 'local' &&
-                            this.currentIndexHtml
-                        ) {
-                            const { type: webCacheType, ...webCacheOptions } =
-                                this.options.webVersionCache;
-                            const webCache = WebCacheFactory.createWebCache(
-                                webCacheType,
-                                webCacheOptions,
+                    let postAuthSetupStep = 'starting';
+                    let postAuthSetupDelayed = false;
+                    const runPostAuthSetupStep = async (step, fn) => {
+                        postAuthSetupStep = step;
+                        return fn();
+                    };
+
+                    const completePostAuthSetup = async () => {
+                        const injected = await runPostAuthSetupStep(
+                            'checking WWebJS utility injection',
+                            () =>
+                                this.pupPage.evaluate(async () => {
+                                    return typeof window.WWebJS !== 'undefined';
+                                }),
+                        );
+
+                        if (!injected) {
+                            if (
+                                this.options.webVersionCache.type ===
+                                    'local' &&
+                                this.currentIndexHtml
+                            ) {
+                                const {
+                                    type: webCacheType,
+                                    ...webCacheOptions
+                                } = this.options.webVersionCache;
+                                const webCache =
+                                    WebCacheFactory.createWebCache(
+                                        webCacheType,
+                                        webCacheOptions,
+                                    );
+
+                                await runPostAuthSetupStep(
+                                    'persisting WhatsApp Web cache',
+                                    () =>
+                                        webCache.persist(
+                                            this.currentIndexHtml,
+                                            version,
+                                        ),
+                                );
+                            }
+
+                            // Load util functions (serializers, helper functions)
+                            await runPostAuthSetupStep(
+                                'injecting WWebJS utilities',
+                                () => this.pupPage.evaluate(LoadUtils),
                             );
 
-                            await webCache.persist(
-                                this.currentIndexHtml,
-                                version,
+                            await runPostAuthSetupStep(
+                                'waiting for WWebJS utilities',
+                                () =>
+                                    this.pupPage
+                                        .waitForFunction(
+                                            'typeof window.WWebJS !== "undefined"',
+                                            { timeout: 30000 },
+                                        )
+                                        .catch(() => {
+                                            throw new Error('WWebJS utilities did not inject within 30 seconds of authentication - WhatsApp Web may have updated its internals');
+                                        }),
                             );
                         }
 
-                        // Load util functions (serializers, helper functions)
-                        await this.pupPage.evaluate(LoadUtils);
+                        if (!this.info) {
+                            this.info = new ClientInfo(
+                                this,
+                                await runPostAuthSetupStep(
+                                    'loading client info',
+                                    () =>
+                                        this.pupPage.evaluate(() => {
+                                            return {
+                                                ...window
+                                                    .require('WAWebConnModel')
+                                                    .Conn.serialize(),
+                                                wid:
+                                                    window
+                                                        .require(
+                                                            'WAWebUserPrefsMeUser',
+                                                        )
+                                                        .getMaybeMePnUser() ||
+                                                    window
+                                                        .require(
+                                                            'WAWebUserPrefsMeUser',
+                                                        )
+                                                        .getMaybeMeLidUser(),
+                                            };
+                                        }),
+                                ),
+                            );
+                        }
 
-                        await this.pupPage
-                            .waitForFunction(
-                                'typeof window.WWebJS !== "undefined"',
-                                { timeout: 30000 },
-                            )
-                            .catch(() => {
-                                throw new Error('WWebJS utilities did not inject within 30 seconds of authentication - WhatsApp Web may have updated its internals');
-                            });
-                    }
+                        if (!this.interface) {
+                            this.interface = new InterfaceController(this);
+                        }
 
-                    if (!this.info) {
-                        this.info = new ClientInfo(
-                            this,
-                            await this.pupPage.evaluate(() => {
-                                return {
-                                    ...window
-                                        .require('WAWebConnModel')
-                                        .Conn.serialize(),
-                                    wid:
-                                        window
-                                            .require('WAWebUserPrefsMeUser')
-                                            .getMaybeMePnUser() ||
-                                        window
-                                            .require('WAWebUserPrefsMeUser')
-                                            .getMaybeMeLidUser(),
-                                };
-                            }),
+                        if (!this._eventListenersAttached) {
+                            await runPostAuthSetupStep(
+                                'attaching WhatsApp event listeners',
+                                () =>
+                                    this.attachEventListeners((step) => {
+                                        postAuthSetupStep = `attaching WhatsApp event listeners: ${step}`;
+                                    }),
+                            );
+                            this._eventListenersAttached = true;
+                        }
+                    };
+
+                    const postAuthSetup = completePostAuthSetup();
+                    let postAuthSetupTimeout;
+                    await Promise.race([
+                        postAuthSetup,
+                        new Promise((_, reject) => {
+                            postAuthSetupTimeout = setTimeout(
+                                () =>
+                                    reject(
+                                        new Error(
+                                            `post-authentication setup is still running after 8 seconds (step: ${postAuthSetupStep})`,
+                                        ),
+                                    ),
+                                8000,
+                            );
+                        }),
+                    ]).catch((err) => {
+                        postAuthSetupDelayed = true;
+                        console.warn(
+                            `[WWebJS] ${err.message}; emitting READY because WhatsApp is authenticated and synced`,
                         );
-                    }
+                    }).finally(() => {
+                        clearTimeout(postAuthSetupTimeout);
+                    });
 
-                    if (!this.interface) {
-                        this.interface = new InterfaceController(this);
-                    }
-
-                    if (!this._eventListenersAttached) {
-                        await this.attachEventListeners();
-                        this._eventListenersAttached = true;
-                    }
+                    postAuthSetup.then(() => {
+                        if (postAuthSetupDelayed) {
+                            console.warn(
+                                '[WWebJS] Delayed post-authentication setup completed',
+                            );
+                        }
+                    });
+                    postAuthSetup.catch((err) => {
+                        console.error(
+                            '[WWebJS] Post-authentication setup failed:',
+                            err,
+                        );
+                    });
 
                     /**
                      * Emitted when the client has initialized and is ready to receive messages.
                      * @event Client#ready
                      */
-                    if (!this._readyEmitted) {
-                        this._readyEmitted = true;
-                        this.emit(Events.READY);
-                        this.authStrategy.afterAuthReady();
-                    }
+                    emitReady();
                 } catch (err) {
                     const message =
                         err && err.message ? err.message : String(err);
@@ -396,6 +479,10 @@ class Client extends EventEmitter {
                         return;
                     }
 
+                    console.error(
+                        '[WWebJS] Post-authentication setup failed:',
+                        err,
+                    );
                     throw err;
                 } finally {
                     if (!this._readyEmitted) {
@@ -407,7 +494,16 @@ class Client extends EventEmitter {
             await exposeFunctionIfAbsent(
                 this.pupPage,
                 'onAppStateHasSyncedEvent',
-                onAppStateHasSynced,
+                () => {
+                    setImmediate(() => {
+                        onAppStateHasSynced().catch((err) => {
+                            console.error(
+                                '[WWebJS] Post-authentication setup failed:',
+                                err,
+                            );
+                        });
+                    });
+                },
             );
             let lastPercent = null;
             await exposeFunctionIfAbsent(
@@ -492,13 +588,11 @@ class Client extends EventEmitter {
                 // Atomic hasSynced check in the same synchronous block as listener registration.
                 // If hasSynced is already true, Backbone won't fire change:hasSynced (no transition).
                 // If hasSynced is false, the listener above will catch the future transition.
-                const storeInjected = typeof window.WWebJS !== 'undefined';
-                if (Socket.hasSynced === true && !storeInjected) {
+                // Always notify Node here: WWebJS may already exist after an Electron/WebView
+                // restore while this Client instance still has not emitted READY.
+                if (Socket.hasSynced === true) {
                     setTimeout(() => {
-                        if (
-                            Socket.hasSynced === true &&
-                            typeof window.WWebJS === 'undefined'
-                        ) {
+                        if (Socket.hasSynced === true) {
                             window.onAppStateHasSyncedEvent();
                         }
                     }, 2000);
@@ -675,9 +769,13 @@ class Client extends EventEmitter {
      * Private function
      * @property {boolean} reinject is this a reinject?
      */
-    async attachEventListeners() {
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+    async attachEventListeners(onProgress = () => {}) {
+        const exposeEventFunction = async (name, fn) => {
+            onProgress(`exposing ${name}`);
+            await exposeFunctionIfAbsent(this.pupPage, name, fn);
+        };
+
+        await exposeEventFunction(
             'onAddMessageEvent',
             (msg) => {
                 if (msg.type === 'gp2') {
@@ -760,8 +858,7 @@ class Client extends EventEmitter {
 
         let last_message;
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onChangeMessageTypeEvent',
             (msg) => {
                 if (msg.type === 'revoked') {
@@ -790,8 +887,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onChangeMessageEvent',
             (msg) => {
                 if (msg.type !== 'revoked') {
@@ -842,8 +938,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onRemoveMessageEvent',
             (msg) => {
                 if (!msg.isNewMsg) return;
@@ -859,8 +954,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onMessageAckEvent',
             (msg, ack) => {
                 const message = new Message(this, msg);
@@ -875,8 +969,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onChatUnreadCountEvent',
             async (data) => {
                 const chat = await this.getChatById(data.id);
@@ -888,8 +981,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onMessageMediaUploadedEvent',
             (msg) => {
                 const message = new Message(this, msg);
@@ -903,8 +995,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onAppStateChangedEvent',
             async (state) => {
                 /**
@@ -948,8 +1039,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onBatteryStateChangedEvent',
             (state) => {
                 const { battery, plugged } = state;
@@ -968,7 +1058,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(this.pupPage, 'onIncomingCall', (call) => {
+        await exposeEventFunction('onIncomingCall', (call) => {
             /**
              * Emitted when a call is received
              * @event Client#incoming_call
@@ -986,8 +1076,7 @@ class Client extends EventEmitter {
             this.emit(Events.INCOMING_CALL, cll);
         });
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onReaction',
             (reactions) => {
                 for (const reaction of reactions) {
@@ -1014,8 +1103,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onRemoveChatEvent',
             async (chat) => {
                 const _chat = await this.getChatById(chat.id);
@@ -1029,8 +1117,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onArchiveChatEvent',
             async (chat, currState, prevState) => {
                 const _chat = await this.getChatById(chat.id);
@@ -1046,8 +1133,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onEditMessageEvent',
             (msg, newBody, prevBody) => {
                 if (msg.type === 'revoked') {
@@ -1069,8 +1155,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onAddMessageCiphertextEvent',
             (msg) => {
                 /**
@@ -1082,8 +1167,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onCiphertextFailedEvent',
             (msg) => {
                 /**
@@ -1098,8 +1182,7 @@ class Client extends EventEmitter {
             },
         );
 
-        await exposeFunctionIfAbsent(
-            this.pupPage,
+        await exposeEventFunction(
             'onPollVoteEvent',
             (votes) => {
                 for (const vote of votes) {
@@ -1113,13 +1196,18 @@ class Client extends EventEmitter {
             },
         );
 
+        onProgress('registering browser event listeners');
         await this.pupPage.evaluate(() => {
             const { Msg, Chat } = window.require('WAWebCollections');
             const AppState = window.require('WAWebSocketModel').Socket;
 
             // Enable placeholder message resend (recovery for ciphertext messages)
-            const gatingUtils = window.require('WAWebSyncGatingUtils');
-            gatingUtils.isPlaceholderMessageResendEnabled = () => true;
+            try {
+                const gatingUtils = window.require('WAWebSyncGatingUtils');
+                gatingUtils.isPlaceholderMessageResendEnabled = () => true;
+            } catch {
+                // Optional recovery hook; do not block READY if WhatsApp renames it.
+            }
 
             Msg.on('change', (msg) => {
                 window.onChangeMessageEvent(window.WWebJS.getMessageModel(msg));
