@@ -796,6 +796,7 @@ class Client extends EventEmitter {
         onProgress('registering native ACK listener');
         await this.pupPage.evaluate(() => {
             const { Msg } = window.require('WAWebCollections');
+            const ENABLE_ACK_TRACE = false;
 
             const getMessageModelSafe = (msg) => {
                 try {
@@ -816,12 +817,14 @@ class Client extends EventEmitter {
             window._wwjsAckListener = (msg, ack) => {
                 const message = getMessageModelSafe(msg);
                 if (message) {
-                    console.debug('[WWebJS ACK TRACE] native ACK event', {
-                        msgId: message?.id?.id,
-                        serializedAck: message?.ack,
-                        eventAck: ack,
-                        fromMe: message?.id?.fromMe || message?.fromMe,
-                    });
+                    if (ENABLE_ACK_TRACE) {
+                        console.debug('[WWebJS ACK TRACE] native ACK event', {
+                            msgId: message?.id?.id,
+                            serializedAck: message?.ack,
+                            eventAck: ack,
+                            fromMe: message?.id?.fromMe || message?.fromMe,
+                        });
+                    }
                     message._wwebjsAckSource = 'native-change:ack';
                     window.onMessageAckEvent(message, ack);
                 }

@@ -576,17 +576,20 @@ exports.LoadUtils = () => {
         const sendMsgChatActionResult = window
             .require('WAWebSendMsgChatAction')
             .addAndSendMsgToChat(chat, message);
-        console.debug('[WWebJS ACK TRACE] send created', {
-            key: newMsgKey._serialized,
-            resultType: Array.isArray(sendMsgChatActionResult)
-                ? 'array'
-                : typeof sendMsgChatActionResult,
-            resultKeys:
-                sendMsgChatActionResult &&
-                typeof sendMsgChatActionResult === 'object'
-                    ? Object.keys(sendMsgChatActionResult)
-                    : undefined,
-        });
+        const ENABLE_ACK_TRACE = false;
+        if (ENABLE_ACK_TRACE) {
+            console.debug('[WWebJS ACK TRACE] send created', {
+                key: newMsgKey._serialized,
+                resultType: Array.isArray(sendMsgChatActionResult)
+                    ? 'array'
+                    : typeof sendMsgChatActionResult,
+                resultKeys:
+                    sendMsgChatActionResult &&
+                    typeof sendMsgChatActionResult === 'object'
+                        ? Object.keys(sendMsgChatActionResult)
+                        : undefined,
+            });
+        }
 
         const findMessageModel = (value) => {
             if (!value) return null;
@@ -644,35 +647,41 @@ exports.LoadUtils = () => {
             findMessageModel(sendMsgResult) ||
             findMessageModel(sendMsgChatActionResult) ||
             Msg.get(newMsgKey._serialized);
-        console.debug('[WWebJS ACK TRACE] send resolved', {
-            key: newMsgKey._serialized,
-            msgPromiseResultType: Array.isArray(msgPromiseResult)
-                ? 'array'
-                : typeof msgPromiseResult,
-            msgPromiseResultKeys:
-                msgPromiseResult && typeof msgPromiseResult === 'object'
-                    ? Object.keys(msgPromiseResult)
-                    : undefined,
-            sentMsgId: sentMsg?.id?._serialized || sentMsg?.id?.id,
-            sentMsgAck: sentMsg?.ack,
-            collectionHasMessage: Boolean(Msg.get(newMsgKey._serialized)),
-        });
+        if (ENABLE_ACK_TRACE) {
+            console.debug('[WWebJS ACK TRACE] send resolved', {
+                key: newMsgKey._serialized,
+                msgPromiseResultType: Array.isArray(msgPromiseResult)
+                    ? 'array'
+                    : typeof msgPromiseResult,
+                msgPromiseResultKeys:
+                    msgPromiseResult && typeof msgPromiseResult === 'object'
+                        ? Object.keys(msgPromiseResult)
+                        : undefined,
+                sentMsgId: sentMsg?.id?._serialized || sentMsg?.id?.id,
+                sentMsgAck: sentMsg?.ack,
+                collectionHasMessage: Boolean(Msg.get(newMsgKey._serialized)),
+            });
+        }
 
         const notifyServerAck = (msg, result) => {
             if (!msg || typeof window.onMessageAckEvent !== 'function') return;
             const ack = 1;
             const messageModel = window.WWebJS.getMessageModel(msg);
             messageModel._wwebjsAckSource = 'send-result';
-            console.debug('[WWebJS ACK TRACE] fallback ACK emit', {
-                key: newMsgKey._serialized,
-                msgId: messageModel?.id?.id,
-                ack,
-                resultType: Array.isArray(result) ? 'array' : typeof result,
-                resultKeys:
-                    result && typeof result === 'object'
-                        ? Object.keys(result)
-                        : undefined,
-            });
+            if (ENABLE_ACK_TRACE) {
+                console.debug('[WWebJS ACK TRACE] fallback ACK emit', {
+                    key: newMsgKey._serialized,
+                    msgId: messageModel?.id?.id,
+                    ack,
+                    resultType: Array.isArray(result)
+                        ? 'array'
+                        : typeof result,
+                    resultKeys:
+                        result && typeof result === 'object'
+                            ? Object.keys(result)
+                            : undefined,
+                });
+            }
             window.onMessageAckEvent(messageModel, ack);
         };
 
@@ -681,20 +690,25 @@ exports.LoadUtils = () => {
         if (ENABLE_SEND_RESULT_ACK_FALLBACK && !options.waitUntilMsgSent && sendMsgResultPromise) {
             Promise.resolve(sendMsgResultPromise)
                 .then((result) => {
-                    console.debug('[WWebJS ACK TRACE] send result resolved', {
-                        key: newMsgKey._serialized,
-                        resultType: Array.isArray(result)
-                            ? 'array'
-                            : typeof result,
-                        resultKeys:
-                            result && typeof result === 'object'
-                                ? Object.keys(result)
-                                : undefined,
-                        ack: result?.ack,
-                        messageSendResult: result?.messageSendResult,
-                        status: result?.status,
-                        success: result?.success,
-                    });
+                    if (ENABLE_ACK_TRACE) {
+                        console.debug(
+                            '[WWebJS ACK TRACE] send result resolved',
+                            {
+                                key: newMsgKey._serialized,
+                                resultType: Array.isArray(result)
+                                    ? 'array'
+                                    : typeof result,
+                                resultKeys:
+                                    result && typeof result === 'object'
+                                        ? Object.keys(result)
+                                        : undefined,
+                                ack: result?.ack,
+                                messageSendResult: result?.messageSendResult,
+                                status: result?.status,
+                                success: result?.success,
+                            },
+                        );
+                    }
                     const ackResult =
                         result?.ack ||
                         result?.messageSendResult ||
