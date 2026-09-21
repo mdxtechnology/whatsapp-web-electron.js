@@ -483,6 +483,11 @@ exports.LoadUtils = () => {
             ...extraOptions,
         };
 
+        // WhatsApp Web added an `id` field to its MediaData model, whose own enumerable
+        // backing property `__x_id` leaks through the `...mediaOptions` spread above and
+        // shadows the real MsgKey on the outgoing Msg. See wwebjs/whatsapp-web.js#201922.
+        delete message.__x_id;
+
         // Bot's won't reply if canonicalUrl is set (linking)
         if (botOptions) {
             delete message.canonicalUrl;
