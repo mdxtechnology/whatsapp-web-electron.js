@@ -627,7 +627,13 @@ class Client extends EventEmitter {
         //     page = (await browser.pages())[0];
         // }
 
-        const page = await pie.getPage(this.pupBrowser, this.browserWindow);
+        // With an Electron BrowserWindow, that window is the page. Without one (a plain
+        // puppeteer host, such as the compatibility validator), the caller has already
+        // launched the browser and is responsible for userDataDir, so take its page
+        // directly. Everything below this point is the same for both.
+        const page = this.browserWindow
+            ? await pie.getPage(this.pupBrowser, this.browserWindow)
+            : ((await this.pupBrowser.pages())[0] ?? (await this.pupBrowser.newPage()));
 
         await page.setUserAgent(this.options.userAgent);
         if (this.options.bypassCSP) await page.setBypassCSP(true);

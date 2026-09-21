@@ -7,7 +7,11 @@ import InterfaceController from './src/util/InterfaceController';
 
 declare namespace WAWebJS {
     export class Client extends EventEmitter {
-        constructor(browser: puppeteer.Browser, browserWindow: BrowserWindow, options?: ClientOptions);
+        /**
+         * @param browserWindow the Electron window hosting WhatsApp Web, or null when the caller
+         * has launched its own puppeteer browser and owns the page lifecycle.
+         */
+        constructor(browser: puppeteer.Browser, browserWindow: BrowserWindow | null, options?: ClientOptions);
 
         /** Current connection information */
         public info: ClientInfo;
