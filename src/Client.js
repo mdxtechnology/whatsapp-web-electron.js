@@ -139,26 +139,56 @@ class Client extends EventEmitter {
             const pairWithPhoneNumber = this.options.pairWithPhoneNumber;
             const version = await this.getWWebVersion();
 
-            const needAuthHandle = await this.pupPage.waitForFunction(
-                () => {
-                    const state =
-                        window.require?.('WAWebSocketModel')?.Socket?.state;
-                    if (
-                        !state ||
-                        state === 'OPENING' ||
-                        state === 'UNLAUNCHED' ||
-                        state === 'PAIRING'
-                    ) {
-                        return false;
+            // MDXT: this wait spans the time WhatsApp Web shows its QR code (the 'qr' event is only
+            // emitted after it), so it must not be limited by authTimeoutMs or an unattended
+            // unauthenticated start exits after 30 seconds. Page load has its own timeout above.
+            // Poll from Node rather than with page.waitForFunction: in-page polling (rAF or
+            // interval) is not re-run on the WhatsApp Web login page, so the wait never saw the
+            // state change. Transient evaluate errors (navigation) are retried.
+            const checkAuthState = () => {
+                const conn = window.require?.('WAWebConnModel')?.Conn;
+                // NB: never call require('WAWebSocketModel') until it has finished loading;
+                // requiring it early makes WhatsApp Web's loader run it with unresolved
+                // dependencies and the page then hangs on "Connecting to WhatsApp".
+                const socketLoaded =
+                    window.require?.('__debug')?.modulesMap?.WAWebSocketModel
+                        ?.factoryFinished === true;
+                const state = socketLoaded
+                    ? window.require('WAWebSocketModel')?.Socket?.state
+                    : undefined;
+                if (!state) {
+                    // Recent WhatsApp Web builds don't load WAWebSocketModel until after
+                    // pairing, so require() returns null while the QR code is showing.
+                    // A QR reference with no paired wid means we need to authenticate.
+                    if (conn?.ref && !conn?.wid) {
+                        return { need: true, state: 'UNPAIRED' };
                     }
-                    return {
-                        need: state === 'UNPAIRED' || state === 'UNPAIRED_IDLE',
-                        state,
-                    };
-                },
-                { timeout: authTimeout },
-            );
-            const needAuthentication = await needAuthHandle.jsonValue();
+                    return false;
+                }
+                if (
+                    state === 'OPENING' ||
+                    state === 'UNLAUNCHED' ||
+                    state === 'PAIRING'
+                ) {
+                    return false;
+                }
+                return {
+                    need: state === 'UNPAIRED' || state === 'UNPAIRED_IDLE',
+                    state,
+                };
+            };
+            let needAuthentication;
+            while (!needAuthentication) {
+                if (abort.signal.aborted) return;
+                try {
+                    needAuthentication = await this.pupPage.evaluate(checkAuthState);
+                } catch (err) {
+                    if (abort.signal.aborted) return;
+                }
+                if (!needAuthentication) {
+                    await new Promise((resolve) => setTimeout(resolve, 500));
+                }
+            }
 
             if (needAuthentication.need) {
                 const { failed, failureEventPayload, restart } =
@@ -262,13 +292,21 @@ class Client extends EventEmitter {
                             .Conn.on('change:ref', onRefChange); // future QR changes
 
                         // Remove QR listener once authentication succeeds
-                        window
-                            .require('WAWebSocketModel')
-                            .Socket.on('change:hasSynced', () => {
-                                window
-                                    .require('WAWebConnModel')
-                                    .Conn.off('change:ref', onRefChange);
-                            });
+                        // WAWebSocketModel isn't loaded yet in recent builds (and must not be
+                        // required early, it breaks WhatsApp Web's loader); the ref listener is
+                        // harmless after pairing (ref is null) so removing it is optional
+                        if (
+                            window.require('__debug')?.modulesMap
+                                ?.WAWebSocketModel?.factoryFinished === true
+                        ) {
+                            window
+                                .require('WAWebSocketModel')
+                                ?.Socket?.on?.('change:hasSynced', () => {
+                                    window
+                                        .require('WAWebConnModel')
+                                        .Conn.off('change:ref', onRefChange);
+                                });
+                        }
                     });
                 }
             }
@@ -526,78 +564,115 @@ class Client extends EventEmitter {
                         .catch((_) => _);
                 },
             );
-            await this.pupPage.evaluate(() => {
-                const Socket = window.require('WAWebSocketModel').Socket;
-                const Cmd = window.require('WAWebCmd').Cmd;
+            // True once the page's exposed callbacks exist and WhatsApp Web has finished loading
+            // its socket model. Never require('WAWebSocketModel') before that (see checkAuthState).
+            const isSocketReady = () =>
+                this.pupPage
+                    .evaluate(
+                        () =>
+                            typeof window.onAuthAppStateChangedEvent === 'function' &&
+                            typeof window.onAppStateHasSyncedEvent === 'function' &&
+                            typeof window.onOfflineProgressUpdateEvent === 'function' &&
+                            typeof window.onLogoutEvent === 'function' &&
+                            window.require?.('__debug')?.modulesMap?.WAWebSocketModel
+                                ?.factoryFinished === true &&
+                            !!window.require('WAWebSocketModel')?.Socket,
+                    )
+                    .catch(() => false);
+            // Recent WhatsApp Web builds don't run WAWebSocketModel (require() returns null)
+            // until pairing is under way, so while the QR code is showing there is no Socket to
+            // listen to. In that case register the listeners in the background once it loads,
+            // so inject() (and initialize()) still complete while the QR code is showing.
+            const registerListeners = async () => {
+                while (
+                    !(await isSocketReady())
+                ) {
+                    if (abort.signal.aborted) return;
+                    await new Promise((resolve) => setTimeout(resolve, 500));
+                }
+                if (abort.signal.aborted) return;
+                await this.pupPage.evaluate(() => {
+                    const Socket = window.require('WAWebSocketModel').Socket;
+                    const Cmd = window.require('WAWebCmd').Cmd;
 
-                const listeners = [
-                    [
-                        Socket,
-                        'change:state',
-                        (_AppState, state) => {
-                            window.onAuthAppStateChangedEvent(state);
-                        },
-                    ],
-                    [
-                        Socket,
-                        'change:hasSynced',
-                        () => {
-                            window.onAppStateHasSyncedEvent();
-                        },
-                    ],
-                    [
-                        Cmd,
-                        'offline_progress_update_from_bridge',
-                        () => {
-                            window.onOfflineProgressUpdateEvent(
-                                window
-                                    .require('WAWebOfflineHandler')
-                                    .OfflineMessageHandler.getOfflineDeliveryProgress(),
-                            );
-                        },
-                    ],
-                    [
-                        Cmd,
-                        'logout',
-                        async () => {
-                            await window.onLogoutEvent();
-                        },
-                    ],
-                    [
-                        Cmd,
-                        'logout_from_bridge',
-                        async () => {
-                            await window.onLogoutEvent();
-                        },
-                    ],
-                ];
+                    const listeners = [
+                        [
+                            Socket,
+                            'change:state',
+                            (_AppState, state) => {
+                                window.onAuthAppStateChangedEvent(state);
+                            },
+                        ],
+                        [
+                            Socket,
+                            'change:hasSynced',
+                            () => {
+                                window.onAppStateHasSyncedEvent();
+                            },
+                        ],
+                        [
+                            Cmd,
+                            'offline_progress_update_from_bridge',
+                            () => {
+                                window.onOfflineProgressUpdateEvent(
+                                    window
+                                        .require('WAWebOfflineHandler')
+                                        .OfflineMessageHandler.getOfflineDeliveryProgress(),
+                                );
+                            },
+                        ],
+                        [
+                            Cmd,
+                            'logout',
+                            async () => {
+                                await window.onLogoutEvent();
+                            },
+                        ],
+                        [
+                            Cmd,
+                            'logout_from_bridge',
+                            async () => {
+                                await window.onLogoutEvent();
+                            },
+                        ],
+                    ];
 
-                // Clean up old listeners to prevent accumulation on re-inject
-                if (window._wwjsListeners) {
-                    for (const [obj, event, handler] of window._wwjsListeners) {
-                        obj.off(event, handler);
+                    // Clean up old listeners to prevent accumulation on re-inject
+                    if (window._wwjsListeners) {
+                        for (const [obj, event, handler] of window._wwjsListeners) {
+                            obj.off(event, handler);
+                        }
+
                     }
 
-                }
+                    for (const [obj, event, handler] of listeners) {
+                        obj.on(event, handler);
+                    }
+                    window._wwjsListeners = listeners;
 
-                for (const [obj, event, handler] of listeners) {
-                    obj.on(event, handler);
-                }
-                window._wwjsListeners = listeners;
-
-                // Atomic hasSynced check in the same synchronous block as listener registration.
-                // If hasSynced is already true, Backbone won't fire change:hasSynced (no transition).
-                // If hasSynced is false, the listener above will catch the future transition.
-                // Always notify Node here: WWebJS may already exist after an Electron/WebView
-                // restore while this Client instance still has not emitted READY.
-                if (Socket.hasSynced === true) {
-                    setTimeout(() => {
-                        if (Socket.hasSynced === true) {
-                            window.onAppStateHasSyncedEvent();
-                        }
-                    }, 2000);
-                }
-            });
+                    // Atomic hasSynced check in the same synchronous block as listener registration.
+                    // If hasSynced is already true, Backbone won't fire change:hasSynced (no transition).
+                    // If hasSynced is false, the listener above will catch the future transition.
+                    // Always notify Node here: WWebJS may already exist after an Electron/WebView
+                    // restore while this Client instance still has not emitted READY.
+                    if (Socket.hasSynced === true) {
+                        setTimeout(() => {
+                            if (Socket.hasSynced === true) {
+                                window.onAppStateHasSyncedEvent();
+                            }
+                        }, 2000);
+                    }
+                });
+            };
+            if (await isSocketReady()) {
+                await registerListeners();
+            } else {
+                registerListeners().catch((err) => {
+                    if (!abort.signal.aborted) {
+                        console.error('[WWebJS] attaching listeners failed:', err);
+                    }
+                });
+            }
         } catch (err) {
             if (abort.signal.aborted) return; // superseded by newer inject
             console.error('[WWebJS] inject() failed:', err);
