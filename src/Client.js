@@ -300,9 +300,22 @@ class Client extends EventEmitter {
                         state == 'UNPAIRED_IDLE' &&
                         !pairWithPhoneNumber.phoneNumber
                     ) {
-                        // refresh qr code
+                        // refresh qr code. WAWebCmd.Cmd.refreshQR was removed by WhatsApp Web (the
+                        // call threw and an idle QR code stayed expired until reloaded by hand);
+                        // the event bus now exposes it. Older builds are tried as fallbacks.
                         await this.pupPage.evaluate(() => {
-                            window.require('WAWebCmd').Cmd.refreshQR();
+                            const bus = window.require('WAWebBackendEventBus')
+                                ?.BackendEventBus;
+                            if (typeof bus?.triggerRefreshQR === 'function') {
+                                return bus.triggerRefreshQR();
+                            }
+                            const cmd = window.require('WAWebCmd')?.Cmd;
+                            if (typeof cmd?.refreshQR === 'function') {
+                                return cmd.refreshQR();
+                            }
+                            return window
+                                .require('WAWebLoginLaunchSocketUtils')
+                                ?.refreshLoginQR?.();
                         });
                     }
                 },
