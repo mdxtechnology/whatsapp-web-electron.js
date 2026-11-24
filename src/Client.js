@@ -139,33 +139,15 @@ class Client extends EventEmitter {
             const pairWithPhoneNumber = this.options.pairWithPhoneNumber;
             const version = await this.getWWebVersion();
 
-            // MDXT: this wait spans the time WhatsApp Web shows its QR code (the 'qr' event is only
-            // emitted after it), so it must not be limited by authTimeoutMs or an unattended
-            // unauthenticated start exits after 30 seconds. Page load has its own timeout above.
-            // Poll from Node rather than with page.waitForFunction: in-page polling (rAF or
-            // interval) is not re-run on the WhatsApp Web login page, so the wait never saw the
-            // state change. Transient evaluate errors (navigation) are retried.
+            // MDXT: poll the socket state from Node rather than with page.waitForFunction: in-page
+            // polling (rAF or interval) is not re-run on the WhatsApp Web login page, so that wait
+            // never saw the state change and timed out after authTimeoutMs. The state is read from
+            // WAWebBackendEventBus, which (unlike WAWebSocketModel) is loaded on the login page.
             const checkAuthState = () => {
-                const conn = window.require?.('WAWebConnModel')?.Conn;
-                // NB: never call require('WAWebSocketModel') until it has finished loading;
-                // requiring it early makes WhatsApp Web's loader run it with unresolved
-                // dependencies and the page then hangs on "Connecting to WhatsApp".
-                const socketLoaded =
-                    window.require?.('__debug')?.modulesMap?.WAWebSocketModel
-                        ?.factoryFinished === true;
-                const state = socketLoaded
-                    ? window.require('WAWebSocketModel')?.Socket?.state
-                    : undefined;
-                if (!state) {
-                    // Recent WhatsApp Web builds don't load WAWebSocketModel until after
-                    // pairing, so require() returns null while the QR code is showing.
-                    // A QR reference with no paired wid means we need to authenticate.
-                    if (conn?.ref && !conn?.wid) {
-                        return { need: true, state: 'UNPAIRED' };
-                    }
-                    return false;
-                }
+                const state = window.require?.('WAWebBackendEventBus')
+                    ?.BackendEventBus?.socketState;
                 if (
+                    !state ||
                     state === 'OPENING' ||
                     state === 'UNLAUNCHED' ||
                     state === 'PAIRING'
@@ -178,14 +160,21 @@ class Client extends EventEmitter {
                 };
             };
             let needAuthentication;
+            const authDeadline = Date.now() + authTimeout;
             while (!needAuthentication) {
                 if (abort.signal.aborted) return;
                 try {
                     needAuthentication = await this.pupPage.evaluate(checkAuthState);
                 } catch (err) {
                     if (abort.signal.aborted) return;
+                    // transient (navigation); retry
                 }
                 if (!needAuthentication) {
+                    if (Date.now() > authDeadline) {
+                        throw new Error(
+                            `WhatsApp Web socket did not leave its initial state within ${authTimeout}ms (authTimeoutMs)`,
+                        );
+                    }
                     await new Promise((resolve) => setTimeout(resolve, 500));
                 }
             }
@@ -292,21 +281,13 @@ class Client extends EventEmitter {
                             .Conn.on('change:ref', onRefChange); // future QR changes
 
                         // Remove QR listener once authentication succeeds
-                        // WAWebSocketModel isn't loaded yet in recent builds (and must not be
-                        // required early, it breaks WhatsApp Web's loader); the ref listener is
-                        // harmless after pairing (ref is null) so removing it is optional
-                        if (
-                            window.require('__debug')?.modulesMap
-                                ?.WAWebSocketModel?.factoryFinished === true
-                        ) {
-                            window
-                                .require('WAWebSocketModel')
-                                ?.Socket?.on?.('change:hasSynced', () => {
-                                    window
-                                        .require('WAWebConnModel')
-                                        .Conn.off('change:ref', onRefChange);
-                                });
-                        }
+                        window
+                            .require('WAWebBackendEventBus')
+                            .BackendEventBus.on('open_socket_stream', () => {
+                                window
+                                    .require('WAWebConnModel')
+                                    .Conn.off('change:ref', onRefChange);
+                            });
                     });
                 }
             }
@@ -564,115 +545,113 @@ class Client extends EventEmitter {
                         .catch((_) => _);
                 },
             );
-            // True once the page's exposed callbacks exist and WhatsApp Web has finished loading
-            // its socket model. Never require('WAWebSocketModel') before that (see checkAuthState).
-            const isSocketReady = () =>
-                this.pupPage
+            // On the main (post-login) route the socket model is loaded lazily. Wait until it has
+            // finished loading before the listener block below requires it, and never require it
+            // earlier: doing so runs it with unresolved dependencies and WhatsApp Web then hangs
+            // on "Connecting to WhatsApp". (The login route uses WAWebBackendEventBus instead.)
+            while (
+                !(await this.pupPage
                     .evaluate(
                         () =>
-                            typeof window.onAuthAppStateChangedEvent === 'function' &&
-                            typeof window.onAppStateHasSyncedEvent === 'function' &&
-                            typeof window.onOfflineProgressUpdateEvent === 'function' &&
-                            typeof window.onLogoutEvent === 'function' &&
-                            window.require?.('__debug')?.modulesMap?.WAWebSocketModel
-                                ?.factoryFinished === true &&
-                            !!window.require('WAWebSocketModel')?.Socket,
+                            window.location.pathname.startsWith('/login') ||
+                            window.require?.('__debug')?.modulesMap
+                                ?.WAWebSocketModel?.factoryFinished === true,
                     )
-                    .catch(() => false);
-            // Recent WhatsApp Web builds don't run WAWebSocketModel (require() returns null)
-            // until pairing is under way, so while the QR code is showing there is no Socket to
-            // listen to. In that case register the listeners in the background once it loads,
-            // so inject() (and initialize()) still complete while the QR code is showing.
-            const registerListeners = async () => {
-                while (
-                    !(await isSocketReady())
-                ) {
-                    if (abort.signal.aborted) return;
-                    await new Promise((resolve) => setTimeout(resolve, 500));
-                }
+                    .catch(() => false))
+            ) {
                 if (abort.signal.aborted) return;
-                await this.pupPage.evaluate(() => {
-                    const Socket = window.require('WAWebSocketModel').Socket;
-                    const Cmd = window.require('WAWebCmd').Cmd;
-
-                    const listeners = [
-                        [
-                            Socket,
-                            'change:state',
-                            (_AppState, state) => {
-                                window.onAuthAppStateChangedEvent(state);
-                            },
-                        ],
-                        [
-                            Socket,
-                            'change:hasSynced',
-                            () => {
-                                window.onAppStateHasSyncedEvent();
-                            },
-                        ],
-                        [
-                            Cmd,
-                            'offline_progress_update_from_bridge',
-                            () => {
-                                window.onOfflineProgressUpdateEvent(
-                                    window
-                                        .require('WAWebOfflineHandler')
-                                        .OfflineMessageHandler.getOfflineDeliveryProgress(),
-                                );
-                            },
-                        ],
-                        [
-                            Cmd,
-                            'logout',
-                            async () => {
-                                await window.onLogoutEvent();
-                            },
-                        ],
-                        [
-                            Cmd,
-                            'logout_from_bridge',
-                            async () => {
-                                await window.onLogoutEvent();
-                            },
-                        ],
-                    ];
-
-                    // Clean up old listeners to prevent accumulation on re-inject
-                    if (window._wwjsListeners) {
-                        for (const [obj, event, handler] of window._wwjsListeners) {
-                            obj.off(event, handler);
-                        }
-
-                    }
-
-                    for (const [obj, event, handler] of listeners) {
-                        obj.on(event, handler);
-                    }
-                    window._wwjsListeners = listeners;
-
-                    // Atomic hasSynced check in the same synchronous block as listener registration.
-                    // If hasSynced is already true, Backbone won't fire change:hasSynced (no transition).
-                    // If hasSynced is false, the listener above will catch the future transition.
-                    // Always notify Node here: WWebJS may already exist after an Electron/WebView
-                    // restore while this Client instance still has not emitted READY.
-                    if (Socket.hasSynced === true) {
-                        setTimeout(() => {
-                            if (Socket.hasSynced === true) {
-                                window.onAppStateHasSyncedEvent();
-                            }
-                        }, 2000);
-                    }
-                });
-            };
-            if (await isSocketReady()) {
-                await registerListeners();
-            } else {
-                registerListeners().catch((err) => {
-                    if (!abort.signal.aborted) {
-                        console.error('[WWebJS] attaching listeners failed:', err);
-                    }
-                });
+                await new Promise((resolve) => setTimeout(resolve, 500));
             }
+            await this.pupPage.evaluate(() => {
+                const Cmd = window.require('WAWebCmd').Cmd;
+
+                let listeners = [
+                    [
+                        Cmd,
+                        'offline_progress_update_from_bridge',
+                        () => {
+                            window.onOfflineProgressUpdateEvent(
+                                window
+                                    .require('WAWebOfflineHandler')
+                                    .OfflineMessageHandler.getOfflineDeliveryProgress(),
+                            );
+                        },
+                    ],
+                    [
+                        Cmd,
+                        'logout',
+                        async () => {
+                            await window.onLogoutEvent();
+                        },
+                    ],
+                    [
+                        Cmd,
+                        'logout_from_bridge',
+                        async () => {
+                            await window.onLogoutEvent();
+                        },
+                    ],
+                ];
+                const loginRoute =
+                    window.location.pathname.startsWith('/login');
+                let Socket = null;
+                if (loginRoute) {
+                    Socket = window.require(
+                        'WAWebBackendEventBus',
+                    ).BackendEventBus;
+                    Socket.hasSynced = Socket.isMainStreamReadyMd;
+                    listeners.push([
+                        Socket,
+                        'set_socket_state',
+                        (state) => {
+                            window.onAuthAppStateChangedEvent(state);
+                        },
+                    ]);
+                    listeners.push([
+                        Socket,
+                        'open_socket_stream',
+                        () => {
+                            window.onAppStateHasSyncedEvent();
+                        },
+                    ]);
+                } else {
+                    Socket = window.require('WAWebSocketModel').Socket;
+                    listeners.push([
+                        Socket,
+                        'change:state',
+                        (_AppState, state) => {
+                            window.onAuthAppStateChangedEvent(state);
+                        },
+                    ]);
+                    listeners.push([
+                        Socket,
+                        'change:hasSynced',
+                        () => {
+                            window.onAppStateHasSyncedEvent();
+                        },
+                    ]);
+                }
+
+                // Clean up old listeners to prevent accumulation on re-inject
+                if (window._wwjsListeners) {
+                    for (const [obj, event, handler] of window._wwjsListeners) {
+                        obj.off(event, handler);
+                    }
+                }
+
+                for (const [obj, event, handler] of listeners) {
+                    obj.on(event, handler);
+                }
+                window._wwjsListeners = listeners;
+
+                // Atomic hasSynced check in the same synchronous block as listener registration.
+                // If hasSynced is already true, Backbone won't fire change:hasSynced (no transition).
+                // If hasSynced is false, the listener above will catch the future transition.
+                const storeInjected = typeof window.WWebJS !== 'undefined';
+                if (Socket.hasSynced === true && !storeInjected) {
+                    window.onAppStateHasSyncedEvent();
+                }
+            });
         } catch (err) {
             if (abort.signal.aborted) return; // superseded by newer inject
             console.error('[WWebJS] inject() failed:', err);
@@ -813,8 +792,8 @@ class Client extends EventEmitter {
                     clearInterval(window.codeInterval); // remove existing interval
                 }
                 window.codeInterval = setInterval(async () => {
-                    const state =
-                        window.require('WAWebSocketModel').Socket.state;
+                    const state = window.require('WAWebBackendEventBus')
+                        .BackendEventBus.socketState;
                     if (state != 'UNPAIRED' && state != 'UNPAIRED_IDLE') {
                         clearInterval(window.codeInterval);
                         return;
@@ -1457,7 +1436,8 @@ class Client extends EventEmitter {
                             const parentMsgKey = reaction.reactionParentKey;
                             const timestamp = reaction.reactionTimestamp / 1000;
                             const sender = reaction.author ?? reaction.from;
-                            const senderUserJid = sender._serialized;
+                            const senderUserJid =
+                                sender._serialized || sender.$1;
 
                             return {
                                 ...reaction,
@@ -1485,14 +1465,15 @@ class Client extends EventEmitter {
                             const parentMsgKey = vote.pollUpdateParentKey;
                             const timestamp = vote.t / 1000;
                             const sender = vote.author ?? vote.from;
-                            const senderUserJid = sender._serialized;
+                            const senderUserJid =
+                                sender._serialized || sender.$1;
 
                             let parentMessage = Msg.get(
-                                parentMsgKey._serialized,
+                                parentMsgKey._serialized || parentMsgKey.$1,
                             );
                             if (!parentMessage) {
                                 const fetched = await Msg.getMessagesById([
-                                    parentMsgKey._serialized,
+                                    parentMsgKey._serialized || parentMsgKey.$1,
                                 ]);
                                 parentMessage = fetched?.messages?.[0] || null;
                             }
@@ -1571,7 +1552,9 @@ class Client extends EventEmitter {
      */
     async logout() {
         await this.pupPage.evaluate(() => {
-            return window.require('WAWebSocketModel').Socket.logout();
+            return window
+                .require('WAWebBackendEventBus')
+                .BackendEventBus.triggerLogout();
         });
         await this.pupBrowser.close();
 
@@ -2121,7 +2104,7 @@ class Client extends EventEmitter {
                 .joinGroupViaInvite(inviteCode);
         }, inviteCode);
 
-        return res.gid._serialized;
+        return res.gid._serialized || res.gid.$1;
     }
 
     /**
@@ -2257,7 +2240,10 @@ class Client extends EventEmitter {
      */
     async getState() {
         return await this.pupPage.evaluate(() => {
-            return window.require('WAWebSocketModel').Socket.state ?? null;
+            return (
+                window.require('WAWebBackendEventBus').BackendEventBus
+                    .socketState ?? null
+            );
         });
     }
 
@@ -2485,7 +2471,9 @@ class Client extends EventEmitter {
      */
     async resetState() {
         await this.pupPage.evaluate(() => {
-            window.require('WAWebSocketModel').Socket.reconnect();
+            window
+                .require('WAWebBackendEventBus')
+                .BackendEventBus.triggerReconnectSocket();
         });
     }
 
@@ -2665,7 +2653,8 @@ class Client extends EventEmitter {
                         (participant.wid = window
                             .require('WAWebApiContact')
                             .getPhoneNumber(participant.wid));
-                    const participantId = participant.wid._serialized;
+                    const participantId =
+                        participant.wid._serialized || participant.wid.$1;
                     const statusCode = participant.error || 200;
 
                     if (autoSendInviteV4 && statusCode === 403) {
@@ -2681,7 +2670,8 @@ class Client extends EventEmitter {
                                     (await window
                                         .require('WAWebCollections')
                                         .Chat.find(participant.wid)),
-                                createGroupResult.wid._serialized,
+                                createGroupResult.wid._serialized ||
+                                    createGroupResult.wid.$1,
                                 createGroupResult.subject,
                                 participant.invite_code,
                                 participant.invite_code_exp,
@@ -3155,7 +3145,7 @@ class Client extends EventEmitter {
             let chatIds = window
                 .require('WAWebCollections')
                 .Blocklist.getModelsArray()
-                .map((a) => a.id._serialized);
+                .map((a) => a.id._serialized || a.id.$1);
             return Promise.all(
                 chatIds.map((id) => window.WWebJS.getContact(id)),
             );
@@ -3216,7 +3206,9 @@ class Client extends EventEmitter {
                 );
                 const chats = window
                     .require('WAWebCollections')
-                    .Chat.filter((e) => chatIds.includes(e.id._serialized));
+                    .Chat.filter((e) =>
+                        chatIds.includes(e.id._serialized || e.id.$1),
+                    );
 
                 let actions = labels.map((label) => ({
                     id: label.id,
@@ -3597,8 +3589,8 @@ class Client extends EventEmitter {
                         await window.WWebJS.enforceLidAndPnRetrieval(userId);
 
                     return {
-                        lid: lid?._serialized,
-                        pn: phone?._serialized,
+                        lid: lid?._serialized || lid?.$1,
+                        pn: phone?._serialized || phone?.$1,
                     };
                 }),
             );
@@ -3669,9 +3661,12 @@ class Client extends EventEmitter {
 
             if (!serialized) return null;
 
-            serialized.chatId = window
-                .require('WAWebJidToWid')
-                .userJidToUserWid(serialized.chatJid)._serialized;
+            serialized.chatId = (() => {
+                const _w = window
+                    .require('WAWebJidToWid')
+                    .userJidToUserWid(serialized.chatJid);
+                return _w._serialized || _w.$1;
+            })();
             delete serialized.chatJid;
 
             return serialized;
